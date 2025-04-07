@@ -37,6 +37,7 @@ try {
         CREATE TABLE IF NOT EXISTS company_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             company_name TEXT DEFAULT 'My Company',
+            company_short_name TEXT DEFAULT '',
             company_email TEXT DEFAULT '',
             company_address TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -55,7 +56,7 @@ try {
     // Create default company settings if none exists
     $stmt = $pdo->query("SELECT COUNT(*) FROM company_settings");
     if ($stmt->fetchColumn() == 0) {
-        $pdo->exec("INSERT INTO company_settings (company_name, company_email, company_address) VALUES ('My Company', 'info@mycompany.com', '123 Main St, Anytown, USA')");
+        $pdo->exec("INSERT INTO company_settings (company_name, company_short_name, company_email, company_address) VALUES ('My Company', 'My Co', 'info@mycompany.com', '123 Main St, Anytown, USA')");
     }
     
     // Check and update database schema if needed
@@ -102,6 +103,23 @@ try {
                 WHERE hours_worked IS NULL
             ");
         }
+        
+        // Check if company_short_name column exists in company_settings table
+        $result = $pdo->query("PRAGMA table_info(company_settings)");
+        $columns = $result->fetchAll(PDO::FETCH_ASSOC);
+        $hasCompanyShortName = false;
+        
+        foreach ($columns as $column) {
+            if ($column['name'] === 'company_short_name') $hasCompanyShortName = true;
+        }
+        
+        // Add company_short_name column if it doesn't exist
+        if (!$hasCompanyShortName) {
+            $pdo->exec("ALTER TABLE company_settings ADD COLUMN company_short_name TEXT DEFAULT ''");
+            
+            // Initialize with a shortened version of company_name
+            $pdo->exec("UPDATE company_settings SET company_short_name = substr(company_name, 1, 10) WHERE company_short_name = ''");
+        }
     } catch (PDOException $e) {
         // Log schema update error but continue with the application
         error_log('Error updating database schema: ' . $e->getMessage());
@@ -114,8 +132,23 @@ try {
 // Handle API requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
-    $data = json_decode(file_get_contents('php://input'), true);
-    $action = $_POST['action'] ?? $data['action'] ?? '';
+    
+    // Check for JSON content type
+    $contentType = isset($_SERVER['CONTENT_TYPE']) ? $_SERVER['CONTENT_TYPE'] : '';
+    $isJson = strpos($contentType, 'application/json') !== false;
+    
+    if ($isJson) {
+        $inputData = file_get_contents('php://input');
+        $data = json_decode($inputData, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            echo json_encode(['success' => false, 'error' => 'Invalid JSON data']);
+            exit;
+        }
+    } else {
+        $data = $_POST;
+    }
+    
+    $action = $data['action'] ?? '';
     
     switch ($action) {
         case 'login':
@@ -166,6 +199,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case 'update_company_settings':
             handleUpdateCompanySettings($pdo);
             break;
+        case 'update_admin_settings':
+            handleUpdateAdminSettings($pdo);
+            break;
         default:
             echo json_encode(['error' => 'Invalid action']);
     }
@@ -174,38 +210,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Login handler
 function handleLogin($pdo) {
-    $input = file_get_contents('php://input');
-    error_log("Login input: " . $input);
-    
-    // Try to parse JSON input
-    $data = json_decode($input, true);
-    if (!$data) {
-        // If JSON parse fails, check if POST data was sent
-        $data = $_POST;
-    }
+    global $data;
     
     $username = $data['username'] ?? '';
     $password = $data['password'] ?? '';
+    $employeeOnly = isset($data['employee_only']) && $data['employee_only'] === true;
+    $companyName = $data['company_name'] ?? '';
     
     // Log the request data
-    error_log("Login attempt - Username: $username");
+    error_log("Login attempt - Username: $username, Company: $companyName");
     
     if (empty($username) || empty($password)) {
         echo json_encode(['success' => false, 'error' => 'Username and password are required']);
         return;
     }
     
+    // If this is an employee login, company name is required
+    if ($employeeOnly && empty($companyName)) {
+        echo json_encode(['success' => false, 'error' => 'Company name is required for employee login']);
+        return;
+    }
+    
     try {
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
-        $stmt->execute([$username]);
+        // If company name is provided, first find the company ID
+        $companyId = null;
+        if (!empty($companyName)) {
+            // Try to find company by full name or short name
+            $companyStmt = $pdo->prepare("SELECT id FROM company_settings WHERE company_name = ? OR company_short_name = ?");
+            $companyStmt->execute([$companyName, $companyName]);
+            $company = $companyStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$company) {
+                echo json_encode(['success' => false, 'error' => 'Company not found']);
+                return;
+            }
+            
+            $companyId = $company['id'];
+            
+            // Now look for the user in this specific company
+            $stmt = $pdo->prepare("SELECT u.* FROM users u 
+                                  WHERE u.username = ? AND u.company_id = ?");
+            $stmt->execute([$username, $companyId]);
+        } else {
+            // Standard login without company filtering
+            $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+            $stmt->execute([$username]);
+        }
+        
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($user && password_verify($password, $user['password'])) {
+            // Check if this is an employee-only login and the user is an admin
+            if ($employeeOnly && $user['is_admin']) {
+                echo json_encode([
+                    'success' => false, 
+                    'error' => 'Please use the administrator login page.',
+                    'is_admin' => true
+                ]);
+                return;
+            }
+            
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['is_admin'] = $user['is_admin'];
             $_SESSION['username'] = $user['username'];
+            $_SESSION['company_id'] = $user['company_id'];
             
-            error_log("Login successful - User ID: {$user['id']}, Admin: {$user['is_admin']}");
+            error_log("Login successful - User ID: {$user['id']}, Admin: {$user['is_admin']}, Company ID: {$user['company_id']}");
             echo json_encode(['success' => true, 'is_admin' => (bool)$user['is_admin']]);
         } else {
             error_log("Login failed - Invalid credentials for username: $username");
@@ -224,7 +294,7 @@ function handleCreateEmployee($pdo) {
         return;
     }
     
-    $data = json_decode(file_get_contents('php://input'), true);
+    global $data;
     $name = $data['name'] ?? '';
     $username = $data['username'] ?? '';
     $password = $data['password'] ?? '';
@@ -314,23 +384,27 @@ function handleGetUsers($pdo) {
 
 // Get user handler
 function handleGetUser($pdo) {
+    // Check if the user is logged in
     if (!isset($_SESSION['user_id'])) {
         echo json_encode(['error' => 'Not logged in']);
         return;
     }
     
-    $data = json_decode(file_get_contents('php://input'), true);
+    global $data;
     $user_id = $data['user_id'] ?? 0;
     
-    // If no user_id is provided but user is logged in, use their own ID
-    if (empty($user_id) && isset($_SESSION['user_id'])) {
+    // If no user_id is provided, use the logged-in user's ID
+    if (empty($user_id)) {
         $user_id = $_SESSION['user_id'];
     }
     
     // Allow users to fetch their own data or admins to fetch any user data
-    if (!$_SESSION['is_admin'] && $user_id != $_SESSION['user_id']) {
-        echo json_encode(['error' => 'Unauthorized']);
-        return;
+    if (!isset($_SESSION['is_admin']) || !$_SESSION['is_admin']) {
+        // Non-admin users can only access their own data
+        if ($user_id != $_SESSION['user_id']) {
+            echo json_encode(['error' => 'Unauthorized']);
+            return;
+        }
     }
     
     try {
@@ -339,12 +413,12 @@ function handleGetUser($pdo) {
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($user) {
-            echo json_encode(['user' => $user]);
+            echo json_encode(['success' => true, 'user' => $user]);
         } else {
             echo json_encode(['error' => 'User not found']);
         }
     } catch (PDOException $e) {
-        echo json_encode(['error' => 'Database error']);
+        echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
     }
 }
 
@@ -355,8 +429,8 @@ function handleUpdateUser($pdo) {
         return;
     }
     
-    $data = json_decode(file_get_contents('php://input'), true);
-    $user_id = $data['user_id'] ?? 0;
+    global $data;
+    $userId = $data['user_id'] ?? 0;
     $name = $data['name'] ?? '';
     $password = $data['password'] ?? '';
     $hourly_wage = $data['hourly_wage'] ?? 0;
@@ -364,14 +438,14 @@ function handleUpdateUser($pdo) {
     $pay_period_start_day = $data['pay_period_start_day'] ?? '';
     
     // Log the received data for debugging
-    error_log("Update user request - User ID: $user_id, Name: $name, Pay Period Type: $pay_period_type, Pay Period Start Day: $pay_period_start_day");
+    error_log("Update user request - User ID: $userId, Name: $name, Pay Period Type: $pay_period_type, Pay Period Start Day: $pay_period_start_day");
     
     // For bi-weekly, also log the raw value to see if it's getting truncated
     if ($pay_period_type === 'bi-weekly') {
         error_log("Bi-weekly start day (raw value): '" . $pay_period_start_day . "' - Type: " . gettype($pay_period_start_day));
     }
     
-    if (empty($user_id) || empty($name)) {
+    if (empty($userId) || empty($name)) {
         echo json_encode(['error' => 'User ID and name are required']);
         return;
     }
@@ -402,7 +476,7 @@ function handleUpdateUser($pdo) {
     try {
         // First, get the current user data to check if we need to update the password
         $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
-        $stmt->execute([$user_id]);
+        $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if (!$user) {
@@ -420,9 +494,9 @@ function handleUpdateUser($pdo) {
                 WHERE id = ?
             ");
             
-            error_log("Executing update with password change: name='$name', hourly_wage='$hourly_wage', pay_period_type='$pay_period_type', pay_period_start_day='$pay_period_start_day', user_id='$user_id'");
+            error_log("Executing update with password change: name='$name', hourly_wage='$hourly_wage', pay_period_type='$pay_period_type', pay_period_start_day='$pay_period_start_day', user_id='$userId'");
             
-            $stmt->execute([$name, $hashed_password, $hourly_wage, $pay_period_type, $pay_period_start_day, $user_id]);
+            $stmt->execute([$name, $hashed_password, $hourly_wage, $pay_period_type, $pay_period_start_day, $userId]);
         } else {
             // Update without changing the password
             $stmt = $pdo->prepare("
@@ -431,9 +505,9 @@ function handleUpdateUser($pdo) {
                 WHERE id = ?
             ");
             
-            error_log("Executing update with params: name='$name', hourly_wage='$hourly_wage', pay_period_type='$pay_period_type', pay_period_start_day='$pay_period_start_day', user_id='$user_id'");
+            error_log("Executing update with params: name='$name', hourly_wage='$hourly_wage', pay_period_type='$pay_period_type', pay_period_start_day='$pay_period_start_day', user_id='$userId'");
             
-            $stmt->execute([$name, $hourly_wage, $pay_period_type, $pay_period_start_day, $user_id]);
+            $stmt->execute([$name, $hourly_wage, $pay_period_type, $pay_period_start_day, $userId]);
         }
         
         echo json_encode(['success' => true, 'message' => 'Employee updated successfully']);
@@ -449,7 +523,7 @@ function handleDeleteUser($pdo) {
         return;
     }
     
-    $data = json_decode(file_get_contents('php://input'), true);
+    global $data;
     $user_id = $data['user_id'] ?? 0;
     
     if ($user_id == $_SESSION['user_id']) {
@@ -741,7 +815,7 @@ function handleGetCompanySettings($pdo) {
 // Update company settings handler
 function handleUpdateCompanySettings($pdo) {
     if (!isset($_SESSION['is_admin']) || !$_SESSION['is_admin']) {
-        echo json_encode(['error' => 'Unauthorized']);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized']);
         return;
     }
     
@@ -753,7 +827,7 @@ function handleUpdateCompanySettings($pdo) {
     $company_id = $admin['company_id'] ?? 1; // Default to 1 if not found
     
     // Get the updated settings from the request
-    $data = json_decode(file_get_contents('php://input'), true);
+    global $data;
     
     // Update company name
     $companyName = $data['company_name'] ?? '';
@@ -761,6 +835,11 @@ function handleUpdateCompanySettings($pdo) {
         $stmt = $pdo->prepare("UPDATE company_settings SET company_name = ? WHERE id = ?");
         $stmt->execute([$companyName, $company_id]);
     }
+    
+    // Update company short name
+    $companyShortName = $data['company_short_name'] ?? '';
+    $stmt = $pdo->prepare("UPDATE company_settings SET company_short_name = ? WHERE id = ?");
+    $stmt->execute([$companyShortName, $company_id]);
     
     // Update company email
     $companyEmail = $data['company_email'] ?? '';
@@ -783,6 +862,90 @@ function handleUpdateCompanySettings($pdo) {
     echo json_encode(['success' => true, 'message' => 'Company settings updated successfully']);
 }
 
+// Handle admin credential updates
+function handleUpdateAdminSettings($pdo) {
+    // Check if user is logged in and is an admin
+    if (!isset($_SESSION['user_id']) || !isset($_SESSION['is_admin']) || !$_SESSION['is_admin']) {
+        echo json_encode(['success' => false, 'error' => 'Unauthorized. Admin privileges required.']);
+        return;
+    }
+    
+    // Get the data from the request
+    global $data;
+    $adminEmail = $data['admin_email'] ?? '';
+    $currentPassword = $data['admin_current_password'] ?? '';
+    $newPassword = $data['admin_new_password'] ?? '';
+    
+    // Get the current admin's user ID
+    $adminId = $_SESSION['user_id'];
+    
+    try {
+        // First, verify the current admin's identity with current password
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ? AND is_admin = 1");
+        $stmt->execute([$adminId]);
+        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$admin) {
+            echo json_encode(['success' => false, 'error' => 'Admin account not found.']);
+            return;
+        }
+        
+        // Verify the current password
+        if (!password_verify($currentPassword, $admin['password'])) {
+            echo json_encode(['success' => false, 'error' => 'Current password is incorrect.']);
+            return;
+        }
+        
+        // Check if the new email is already in use by another user
+        if ($adminEmail !== $admin['username']) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE username = ? AND id != ?");
+            $stmt->execute([$adminEmail, $adminId]);
+            if ($stmt->fetchColumn() > 0) {
+                echo json_encode(['success' => false, 'error' => 'Email is already in use by another account.']);
+                return;
+            }
+        }
+        
+        // Start building the update query
+        $updates = [];
+        $params = [];
+        
+        // Update email if it's different
+        if ($adminEmail !== $admin['username']) {
+            $updates[] = "username = ?";
+            $params[] = $adminEmail;
+        }
+        
+        // Update password if provided
+        if (!empty($newPassword)) {
+            $updates[] = "password = ?";
+            $params[] = password_hash($newPassword, PASSWORD_DEFAULT);
+        }
+        
+        // Only proceed if there are changes to make
+        if (!empty($updates)) {
+            // Add admin ID to params
+            $params[] = $adminId;
+            
+            // Build and execute the update query
+            $query = "UPDATE users SET " . implode(", ", $updates) . " WHERE id = ?";
+            $stmt = $pdo->prepare($query);
+            $stmt->execute($params);
+            
+            // Update session if email changed
+            if ($adminEmail !== $admin['username']) {
+                $_SESSION['username'] = $adminEmail;
+            }
+            
+            echo json_encode(['success' => true, 'message' => 'Admin credentials updated successfully.']);
+        } else {
+            echo json_encode(['success' => true, 'message' => 'No changes were made.']);
+        }
+    } catch (PDOException $e) {
+        echo json_encode(['success' => false, 'error' => 'Database error: ' . $e->getMessage()]);
+    }
+}
+
 // If not an API request, display the HTML page
 ?>
 <!DOCTYPE html>
@@ -790,7 +953,7 @@ function handleUpdateCompanySettings($pdo) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TimeClock System</title>
+    <title>TimeClock System - Admin Portal</title>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <style>
         /* Base styles */
@@ -900,8 +1063,29 @@ function handleUpdateCompanySettings($pdo) {
             font-weight: 500;
         }
         
+        .company-info {
+            text-align: center;
+            padding: 10px 0;
+            font-size: 1rem;
+            color: #3498db;
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .company-info span {
+            display: block;
+            line-height: 1.5;
+            margin: 0 20px;
+            font-weight: 500;
+        }
+        
+        #supportEmailDisplay {
+            font-size: 0.9rem;
+            color: #7f8c8d;
+        }
+        
         .logout-btn {
-            background-color: transparent;
+            background-color: #e74c3c;
             color: white;
             border: 1px solid rgba(255, 255, 255, 0.5);
             padding: 8px 15px;
@@ -911,7 +1095,7 @@ function handleUpdateCompanySettings($pdo) {
         }
         
         .logout-btn:hover {
-            background-color: rgba(255, 255, 255, 0.1);
+            background-color: #c0392b;
             border-color: white;
         }
         
@@ -2326,16 +2510,82 @@ function handleUpdateCompanySettings($pdo) {
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
+
+        /* Admin Settings Styles */
+        .admin-settings-form {
+            max-width: 600px;
+            background-color: #fff;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            margin-top: 20px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .admin-settings-form textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 15px;
+            resize: vertical;
+            font-family: inherit;
+        }
+
+        .admin-settings-form textarea:focus {
+            border-color: #3498db;
+            box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+            outline: none;
+        }
+
+        .save-admin-settings-btn {
+            background-color: #27ae60;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 12px 20px;
+            margin-top: 15px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: background-color 0.3s;
+        }
+
+        .save-admin-settings-btn:hover {
+            background-color: #219955;
+        }
+
+        .admin-settings-message {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 15px;
+        }
+
+        .admin-settings-message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .admin-settings-message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
     </style>
 </head>
 <body>
     <div id="loginForm">
-        <h2>Login</h2>
+        <h2>Administrator Login</h2>
         <input type="text" id="username" placeholder="Username">
         <input type="password" id="password" placeholder="Password">
         <button onclick="login()">Login</button>
         <div class="signup-link" style="text-align: center; margin-top: 20px;">
             <a href="signup.php" style="color: #3498db; text-decoration: none;">Create a new account</a>
+        </div>
+        <div class="employee-link" style="text-align: center; margin-top: 10px; font-size: 14px;">
+            <a href="employee-login.php" style="color: #7f8c8d; text-decoration: none;">Employee Clock In</a>
         </div>
     </div>
 
@@ -2343,6 +2593,10 @@ function handleUpdateCompanySettings($pdo) {
         <div class="panel-header">
             <h2 id="employeeTimeclockHeader" class="centered-header">TimeClock</h2>
             <button id="logoutBtn" onclick="logout()" class="logout-btn">Log Out</button>
+        </div>
+        <div id="companyInfo" class="company-info">
+            <span id="companyNameDisplay"></span>
+            <span id="supportEmailDisplay"></span>
         </div>
         <div id="currentTimeDisplay" class="current-time">
             Current Time: <span id="currentTime"></span>
@@ -2459,6 +2713,10 @@ function handleUpdateCompanySettings($pdo) {
                         <input type="text" id="companyName" placeholder="Company Name">
                     </div>
                     <div class="form-group">
+                        <label for="companyShortName">Company Short Name:</label>
+                        <input type="text" id="companyShortName" placeholder="Short Name">
+                    </div>
+                    <div class="form-group">
                         <label for="companyEmail">Company Email:</label>
                         <input type="email" id="companyEmail" placeholder="contact@company.com">
                     </div>
@@ -2468,6 +2726,28 @@ function handleUpdateCompanySettings($pdo) {
                     </div>
                     <button id="saveSettingsBtn" class="save-settings-btn">Save Settings</button>
                     <div id="settingsMessage" class="settings-message"></div>
+                </div>
+
+                <h3 style="margin-top: 30px;">Admin Account Settings</h3>
+                <div class="admin-settings-form">
+                    <div class="form-group">
+                        <label for="adminEmail">Admin Email (Username):</label>
+                        <input type="email" id="adminEmail" placeholder="your@email.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="adminCurrentPassword">Current Password:</label>
+                        <input type="password" id="adminCurrentPassword" placeholder="Current Password">
+                    </div>
+                    <div class="form-group">
+                        <label for="adminNewPassword">New Password (leave blank to keep current):</label>
+                        <input type="password" id="adminNewPassword" placeholder="New Password">
+                    </div>
+                    <div class="form-group">
+                        <label for="adminConfirmPassword">Confirm New Password:</label>
+                        <input type="password" id="adminConfirmPassword" placeholder="Confirm New Password">
+                    </div>
+                    <button id="saveAdminSettingsBtn" class="save-admin-settings-btn">Update Admin Credentials</button>
+                    <div id="adminSettingsMessage" class="admin-settings-message"></div>
                 </div>
             </div>
         </div>
@@ -2696,12 +2976,48 @@ function handleUpdateCompanySettings($pdo) {
                             loadAdminEntries();
                         } else {
                             console.log('Employee login successful');
-                            // Set the employee's name in the header if available from session check
-                            if (response.name) {
-                                $('#employeeTimeclockHeader').text(response.name + "'s Time Clock");
-                            }
+                            // Initialize employee timeclock panel
                             $('#timeclockPanel').removeClass('hidden');
-                            loadEntries();
+                            
+                            // Initialize the clock display
+                            updateCurrentTime();
+                            setInterval(updateCurrentTime, 1000);
+                            
+                            // Check if currently clocked in
+                            $.ajax({
+                                url: 'index.php',
+                                method: 'POST',
+                                contentType: 'application/json',
+                                dataType: 'json',
+                                data: JSON.stringify({ action: 'get_entries' }),
+                                success: function(response) {
+                                    console.log('Clock status check:', response);
+                                    if (response && response.entries) {
+                                        const hasActiveEntry = response.entries.some(entry => !entry.clock_out);
+                                        updateClockStatus(hasActiveEntry);
+                                    }
+                                    
+                                    // Set employee name in header
+                                    $.ajax({
+                                        url: 'index.php',
+                                        method: 'POST',
+                                        contentType: 'application/json',
+                                        dataType: 'json',
+                                        data: JSON.stringify({ action: 'get_user' }),
+                                        success: function(response) {
+                                            if (response && response.user) {
+                                                $('#employeeTimeclockHeader').text(response.user.name + "'s Time Clock");
+                                            }
+                                            
+                                            // Load company info
+                                            loadCompanyInfo();
+                                            
+                                            $('#timeclockPanel').removeClass('hidden');
+                                            loadEntries();
+                                        }
+                                    });
+                                }
+                            });
                         }
                     }
                 }
@@ -2740,12 +3056,48 @@ function handleUpdateCompanySettings($pdo) {
                             loadAdminEntries();
                         } else {
                             console.log('Employee login successful');
-                            // Set the employee's name in the header if available from session check
-                            if (response.name) {
-                                $('#employeeTimeclockHeader').text(response.name + "'s Time Clock");
-                            }
+                            // Initialize employee timeclock panel
                             $('#timeclockPanel').removeClass('hidden');
-                            loadEntries();
+                            
+                            // Initialize the clock display
+                            updateCurrentTime();
+                            setInterval(updateCurrentTime, 1000);
+                            
+                            // Check if currently clocked in
+                            $.ajax({
+                                url: 'index.php',
+                                method: 'POST',
+                                contentType: 'application/json',
+                                dataType: 'json',
+                                data: JSON.stringify({ action: 'get_entries' }),
+                                success: function(response) {
+                                    console.log('Clock status check:', response);
+                                    if (response && response.entries) {
+                                        const hasActiveEntry = response.entries.some(entry => !entry.clock_out);
+                                        updateClockStatus(hasActiveEntry);
+                                    }
+                                    
+                                    // Set employee name in header
+                                    $.ajax({
+                                        url: 'index.php',
+                                        method: 'POST',
+                                        contentType: 'application/json',
+                                        dataType: 'json',
+                                        data: JSON.stringify({ action: 'get_user' }),
+                                        success: function(response) {
+                                            if (response && response.user) {
+                                                $('#employeeTimeclockHeader').text(response.user.name + "'s Time Clock");
+                                            }
+                                            
+                                            // Load company info
+                                            loadCompanyInfo();
+                                            
+                                            $('#timeclockPanel').removeClass('hidden');
+                                            loadEntries();
+                                        }
+                                    });
+                                }
+                            });
                         }
                     } else {
                         console.error('Login failed response:', response);
@@ -2844,10 +3196,7 @@ function handleUpdateCompanySettings($pdo) {
                 success: function(response) {
                     console.log('Got employee data:', response);
                     if (response && response.user) {
-                        // Update header with employee's full name
-                        $('#employeeTimeclockHeader').text(response.user.name + "'s Time Clock");
-                        
-                        // Initialize pay period navigation (handled separately)
+                        // Initialize pay period navigation
                         initializeEmployeePayPeriod();
                     } else {
                         console.error('Failed to get employee data or data is invalid:', response);
@@ -2999,7 +3348,7 @@ function handleUpdateCompanySettings($pdo) {
                 success: function(response) {
                     console.log('Got employee data for pay period:', response);
                     
-                    if (response && response.user) {
+                    if (response && response.success && response.user) {
                         // Store employee pay period settings
                         employeePayPeriod = {
                             id: response.user.id,
@@ -3028,7 +3377,9 @@ function handleUpdateCompanySettings($pdo) {
                     $('#employeePeriodInfo').text('Error loading pay period data. Using defaults.');
                     // Use default values and proceed anyway
                     navigateEmployeePayPeriod('current');
-                }
+                },
+                // Add a timeout to ensure we don't hang indefinitely
+                timeout: 5000
             });
         }
         
@@ -3467,6 +3818,7 @@ function handleUpdateCompanySettings($pdo) {
         function loadCompanySettings() {
             // Clear any previous messages
             $('#settingsMessage').removeClass('success error').text('');
+            $('#adminSettingsMessage').removeClass('success error').text('');
             
             // Load company settings from the server
             $.ajax({
@@ -3480,21 +3832,43 @@ function handleUpdateCompanySettings($pdo) {
                     if (response.success && response.settings) {
                         // Populate the form with company settings
                         $('#companyName').val(response.settings.company_name);
+                        $('#companyShortName').val(response.settings.company_short_name);
                         $('#companyEmail').val(response.settings.company_email);
                         $('#companyAddress').val(response.settings.company_address);
                     }
                 }
             });
             
-            // Set up the save button event handler
+            // Load current admin email
+            $.ajax({
+                url: 'index.php',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ 
+                    action: 'get_user'
+                }),
+                success: function(response) {
+                    if (response.user) {
+                        // Populate the admin email field
+                        $('#adminEmail').val(response.user.username);
+                    }
+                }
+            });
+            
+            // Set up the save buttons event handlers
             $('#saveSettingsBtn').off('click').on('click', function() {
                 saveCompanySettings();
+            });
+            
+            $('#saveAdminSettingsBtn').off('click').on('click', function() {
+                updateAdminSettings();
             });
         }
         
         function saveCompanySettings() {
             // Get the form values
             const companyName = $('#companyName').val();
+            const companyShortName = $('#companyShortName').val();
             const companyEmail = $('#companyEmail').val();
             const companyAddress = $('#companyAddress').val();
             
@@ -3512,6 +3886,7 @@ function handleUpdateCompanySettings($pdo) {
                 data: JSON.stringify({ 
                     action: 'update_company_settings',
                     company_name: companyName,
+                    company_short_name: companyShortName,
                     company_email: companyEmail,
                     company_address: companyAddress
                 }),
@@ -4460,6 +4835,99 @@ function handleUpdateCompanySettings($pdo) {
                 }
             });
         });
+
+        // Update admin settings
+        function updateAdminSettings() {
+            const adminEmail = $('#adminEmail').val();
+            const adminCurrentPassword = $('#adminCurrentPassword').val();
+            const adminNewPassword = $('#adminNewPassword').val();
+            const adminConfirmPassword = $('#adminConfirmPassword').val();
+
+            // Validate form inputs
+            if (!adminEmail) {
+                $('#adminSettingsMessage').removeClass('success').addClass('error').text('Admin email is required');
+                return;
+            }
+
+            if (!adminCurrentPassword && !adminNewPassword) {
+                $('#adminSettingsMessage').removeClass('success').addClass('error').text('Please provide either the current password or a new password');
+                return;
+            }
+
+            if (adminNewPassword && adminNewPassword !== adminConfirmPassword) {
+                $('#adminSettingsMessage').removeClass('success').addClass('error').text('New password and confirm password do not match');
+                return;
+            }
+
+            $.ajax({
+                url: 'index.php',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    action: 'update_admin_settings',
+                    admin_email: adminEmail,
+                    admin_current_password: adminCurrentPassword,
+                    admin_new_password: adminNewPassword
+                }),
+                success: function(response) {
+                    if (response.success) {
+                        $('#adminSettingsMessage').removeClass('error').addClass('success').text(response.message);
+                        // Optionally, you might want to refresh the admin panel or clear form fields
+                        $('#adminEmail').val('');
+                        $('#adminCurrentPassword').val('');
+                        $('#adminNewPassword').val('');
+                        $('#adminConfirmPassword').val('');
+                    } else {
+                        $('#adminSettingsMessage').removeClass('success').addClass('error').text(response.error || 'Error updating admin settings');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#adminSettingsMessage').removeClass('success').addClass('error').text('Error updating admin settings: ' + error);
+                }
+            });
+        }
+
+        // Add event listener for save button
+        $('#saveAdminSettingsBtn').click(function(e) {
+            e.preventDefault();
+            updateAdminSettings();
+        });
+
+        // Function to load company info for the employee view
+        function loadCompanyInfo() {
+            $.ajax({
+                url: 'index.php',
+                method: 'POST',
+                contentType: 'application/json',
+                dataType: 'json',
+                data: JSON.stringify({ action: 'get_company_settings' }),
+                success: function(response) {
+                    if (response && response.success && response.settings) {
+                        // Display company name
+                        if (response.settings.company_name) {
+                            $('#companyNameDisplay').text(response.settings.company_name);
+                        }
+                        
+                        // Display support email with label
+                        if (response.settings.company_email) {
+                            $('#supportEmailDisplay').text('Support: ' + response.settings.company_email);
+                        } else {
+                            $('#supportEmailDisplay').hide();
+                        }
+                        
+                        // Show the company info section
+                        $('#companyInfo').show();
+                    } else {
+                        // Hide the company info section if no data
+                        $('#companyInfo').hide();
+                    }
+                },
+                error: function() {
+                    // Hide the company info section on error
+                    $('#companyInfo').hide();
+                }
+            });
+        }
     </script>
 </body>
-</html> 
+</html>

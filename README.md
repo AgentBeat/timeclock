@@ -23,15 +23,6 @@ A lightweight employee time tracking system built with PHP, SQLite, and jQuery.
 2. Ensure the directory has proper write permissions for the SQLite database
 3. Access the application through your web browser
 
-## Default Login Credentials
-
-```
-Admin User:
-Username: admin
-Password: admin123
-```
-
-⚠️ **IMPORTANT**: Change the admin password immediately after first login!
 
 ## Security Notes
 

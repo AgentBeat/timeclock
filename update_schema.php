@@ -1,5 +1,5 @@
 <?php
-// Script to update database schema to add hourly_wage column
+// Script to update database schema to add company_id column
 
 // Database configuration
 $db_file = 'timeclock.sqlite';
@@ -10,25 +10,33 @@ try {
     $pdo = new PDO($dsn);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     
-    // Check if the column already exists
+    // Check if company_id column already exists in users table
     $stmt = $pdo->query("PRAGMA table_info(users)");
     $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
-    $hourly_wage_exists = false;
+    $company_id_exists = false;
     foreach ($columns as $column) {
-        if ($column['name'] === 'hourly_wage') {
-            $hourly_wage_exists = true;
+        if ($column['name'] === 'company_id') {
+            $company_id_exists = true;
             break;
         }
     }
     
     // Add the column if it doesn't exist
-    if (!$hourly_wage_exists) {
-        echo "Adding hourly_wage column to users table...\n";
-        $pdo->exec("ALTER TABLE users ADD COLUMN hourly_wage REAL DEFAULT 0");
+    if (!$company_id_exists) {
+        echo "Adding company_id column to users table...\n";
+        $pdo->exec("ALTER TABLE users ADD COLUMN company_id INTEGER DEFAULT 1");
         echo "Column added successfully!\n";
+        
+        // Set all existing users to company_id 1 (default company)
+        $pdo->exec("UPDATE users SET company_id = 1");
+        echo "Updated existing users to default company_id!\n";
+        
+        // Update admin user's company name to SellingNorthCarolina.com
+        $pdo->exec("UPDATE company_settings SET company_name = 'SellingNorthCarolina.com' WHERE id = 1");
+        echo "Updated company name to SellingNorthCarolina.com!\n";
     } else {
-        echo "The hourly_wage column already exists in the users table.\n";
+        echo "The company_id column already exists in the users table.\n";
     }
     
 } catch (PDOException $e) {

@@ -9,6 +9,7 @@ $dsn = "sqlite:$db_file";
 
 // Initialize variables
 $company_name = '';
+$company_short_name = '';
 $email = '';
 $errors = [];
 $success = null;
@@ -21,6 +22,7 @@ try {
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Get posted data
         $company_name = trim($_POST['company_name'] ?? '');
+        $company_short_name = trim($_POST['company_short_name'] ?? '');
         $email = trim($_POST['email'] ?? '');
         $password = $_POST['password'] ?? '';
         $confirm_password = $_POST['confirm_password'] ?? '';
@@ -28,6 +30,10 @@ try {
         // Validate input
         if (empty($company_name)) {
             $errors[] = "Company name is required";
+        }
+        
+        if (empty($company_short_name)) {
+            $errors[] = "Company short name is required";
         }
         
         if (empty($email)) {
@@ -69,6 +75,7 @@ try {
                         CREATE TABLE IF NOT EXISTS company_settings (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             company_name TEXT DEFAULT 'My Company',
+                            company_short_name TEXT DEFAULT '',
                             company_email TEXT DEFAULT '',
                             company_address TEXT DEFAULT '',
                             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -77,8 +84,8 @@ try {
                 }
                 
                 // Insert new company settings
-                $stmt = $pdo->prepare("INSERT INTO company_settings (company_name, company_email) VALUES (?, ?)");
-                $stmt->execute([$company_name, $email]);
+                $stmt = $pdo->prepare("INSERT INTO company_settings (company_name, company_short_name, company_email) VALUES (?, ?, ?)");
+                $stmt->execute([$company_name, $company_short_name, $email]);
                 $company_id = $pdo->lastInsertId();
                 
                 // Insert admin user
@@ -94,6 +101,7 @@ try {
                 
                 // Clear form data after successful submission
                 $company_name = '';
+                $company_short_name = '';
                 $email = '';
             } catch (PDOException $e) {
                 // Rollback transaction on error
@@ -237,6 +245,12 @@ try {
             border-radius: 4px;
             border: 1px solid #c3e6cb;
         }
+        
+        .helper-text {
+            font-size: 0.8em;
+            color: #6c757d;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
@@ -262,6 +276,12 @@ try {
                 <div class="form-group">
                     <label for="company_name">Company Name</label>
                     <input type="text" id="company_name" name="company_name" value="<?php echo htmlspecialchars($company_name ?? ''); ?>" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="company_short_name">Company Short Name</label>
+                    <input type="text" id="company_short_name" name="company_short_name" value="<?php echo htmlspecialchars($company_short_name ?? ''); ?>" maxlength="15" placeholder="e.g., ACME">
+                    <div class="helper-text">Enter an abbreviation or short version of your company name. Employees will use this when logging in.</div>
                 </div>
                 
                 <div class="form-group">
