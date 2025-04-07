@@ -1,0 +1,30 @@
+# Prevent viewing of .htaccess file
+<Files .htaccess>
+    Order allow,deny
+    Deny from all
+</Files>
+
+# Protect the SQLite database file
+<Files timeclock.sqlite>
+    Order allow,deny
+    Deny from all
+</Files>
+
+# PHP settings
+php_flag display_errors off
+php_value max_execution_time 30
+php_value max_input_time 60
+php_value memory_limit 128M
+php_value post_max_size 8M
+php_value session.gc_maxlifetime 1440
+php_value session.save_handler files
+php_value upload_max_filesize 2M
+php_flag session.cookie_httponly on
+php_flag session.use_only_cookies on
+php_flag session.use_strict_mode on
+
+# Security headers
+Header set X-Content-Type-Options "nosniff"
+Header set X-Frame-Options "SAMEORIGIN"
+Header set X-XSS-Protection "1; mode=block"
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" 

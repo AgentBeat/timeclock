@@ -1,0 +1,25 @@
+# SQLite database files
+*.sqlite
+*.db
+*.sqlite3
+
+# Environment files
+.env
+
+# IDE and editor folders
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp 
