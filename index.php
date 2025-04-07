@@ -232,6 +232,13 @@ function handleCreateEmployee($pdo) {
     $pay_period_type = $data['pay_period_type'] ?? 'weekly';
     $pay_period_start_day = $data['pay_period_start_day'] ?? 0;
     
+    // Get the company_id of the currently logged-in admin
+    $admin_id = $_SESSION['user_id'];
+    $stmt = $pdo->prepare("SELECT company_id FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+    $company_id = $admin['company_id'] ?? 1; // Default to 1 if not found
+    
     if (empty($name) || empty($username) || empty($password)) {
         echo json_encode(['error' => 'Name, username and password are required']);
         return;
@@ -259,10 +266,10 @@ function handleCreateEmployee($pdo) {
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
         $stmt = $pdo->prepare("
             INSERT INTO users 
-            (username, password, name, hourly_wage, pay_period_type, pay_period_start_day, is_admin) 
-            VALUES (?, ?, ?, ?, ?, ?, 0)
+            (username, password, name, hourly_wage, pay_period_type, pay_period_start_day, is_admin, company_id) 
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
         ");
-        $stmt->execute([$username, $hashed_password, $name, $hourly_wage, $pay_period_type, $pay_period_start_day]);
+        $stmt->execute([$username, $hashed_password, $name, $hourly_wage, $pay_period_type, $pay_period_start_day, $company_id]);
         echo json_encode(['success' => true, 'message' => 'Employee created successfully']);
     } catch (PDOException $e) {
         if ($e->getCode() == 23000) {
@@ -280,20 +287,28 @@ function handleGetUsers($pdo) {
         return;
     }
     
+    // Get the admin's company_id
+    $admin_id = $_SESSION['user_id'];
+    $stmt = $pdo->prepare("SELECT company_id FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+    $company_id = $admin['company_id'] ?? 1; // Default to 1 if not found
+    
     // Only return non-admin users for standard employee operations
     $data = json_decode(file_get_contents('php://input'), true);
     $include_admins = $data['include_admins'] ?? false;
     
     $query = "SELECT id, username, name, pay_period_type, pay_period_start_day, is_admin, created_at 
-              FROM users";
+              FROM users WHERE company_id = ?";
               
     if (!$include_admins) {
-        $query .= " WHERE is_admin = 0";
+        $query .= " AND is_admin = 0";
     }
     
     $query .= " ORDER BY created_at DESC";
     
-    $stmt = $pdo->query($query);
+    $stmt = $pdo->prepare($query);
+    $stmt->execute([$company_id]);
     echo json_encode(['users' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
 }
 
@@ -703,9 +718,21 @@ function handleAddManualTimeEntry($pdo) {
 
 // Get company settings handler
 function handleGetCompanySettings($pdo) {
+    if (!isset($_SESSION['user_id'])) {
+        echo json_encode(['error' => 'Not logged in']);
+        return;
+    }
+    
+    // Get the user's company_id
+    $user_id = $_SESSION['user_id'];
+    $stmt = $pdo->prepare("SELECT company_id FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    $user = $stmt->fetch(PDO::FETCH_ASSOC);
+    $company_id = $user['company_id'] ?? 1; // Default to 1 if not found
+    
     // Fetch company settings from the database
-    $stmt = $pdo->prepare("SELECT * FROM company_settings");
-    $stmt->execute();
+    $stmt = $pdo->prepare("SELECT * FROM company_settings WHERE id = ?");
+    $stmt->execute([$company_id]);
     $settings = $stmt->fetch(PDO::FETCH_ASSOC);
     
     echo json_encode(['success' => true, 'settings' => $settings]);
@@ -713,33 +740,45 @@ function handleGetCompanySettings($pdo) {
 
 // Update company settings handler
 function handleUpdateCompanySettings($pdo) {
+    if (!isset($_SESSION['is_admin']) || !$_SESSION['is_admin']) {
+        echo json_encode(['error' => 'Unauthorized']);
+        return;
+    }
+    
+    // Get the admin's company_id
+    $admin_id = $_SESSION['user_id'];
+    $stmt = $pdo->prepare("SELECT company_id FROM users WHERE id = ?");
+    $stmt->execute([$admin_id]);
+    $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+    $company_id = $admin['company_id'] ?? 1; // Default to 1 if not found
+    
     // Get the updated settings from the request
     $data = json_decode(file_get_contents('php://input'), true);
     
     // Update company name
     $companyName = $data['company_name'] ?? '';
     if (!empty($companyName)) {
-        $stmt = $pdo->prepare("UPDATE company_settings SET company_name = ? WHERE id = 1");
-        $stmt->execute([$companyName]);
+        $stmt = $pdo->prepare("UPDATE company_settings SET company_name = ? WHERE id = ?");
+        $stmt->execute([$companyName, $company_id]);
     }
     
     // Update company email
     $companyEmail = $data['company_email'] ?? '';
     if (!empty($companyEmail)) {
-        $stmt = $pdo->prepare("UPDATE company_settings SET company_email = ? WHERE id = 1");
-        $stmt->execute([$companyEmail]);
+        $stmt = $pdo->prepare("UPDATE company_settings SET company_email = ? WHERE id = ?");
+        $stmt->execute([$companyEmail, $company_id]);
     }
     
     // Update company address
     $companyAddress = $data['company_address'] ?? '';
     if (!empty($companyAddress)) {
-        $stmt = $pdo->prepare("UPDATE company_settings SET company_address = ? WHERE id = 1");
-        $stmt->execute([$companyAddress]);
+        $stmt = $pdo->prepare("UPDATE company_settings SET company_address = ? WHERE id = ?");
+        $stmt->execute([$companyAddress, $company_id]);
     }
     
     // Update the updated_at timestamp
-    $stmt = $pdo->prepare("UPDATE company_settings SET updated_at = datetime('now', 'localtime') WHERE id = 1");
-    $stmt->execute();
+    $stmt = $pdo->prepare("UPDATE company_settings SET updated_at = datetime('now', 'localtime') WHERE id = ?");
+    $stmt->execute([$company_id]);
     
     echo json_encode(['success' => true, 'message' => 'Company settings updated successfully']);
 }
@@ -2295,6 +2334,9 @@ function handleUpdateCompanySettings($pdo) {
         <input type="text" id="username" placeholder="Username">
         <input type="password" id="password" placeholder="Password">
         <button onclick="login()">Login</button>
+        <div class="signup-link" style="text-align: center; margin-top: 20px;">
+            <a href="signup.php" style="color: #3498db; text-decoration: none;">Create a new account</a>
+        </div>
     </div>
 
     <div id="timeclockPanel" class="hidden">
